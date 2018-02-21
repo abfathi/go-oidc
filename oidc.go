@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/sha512"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -55,14 +56,6 @@ func ClientContext(ctx context.Context, client *http.Client) context.Context {
 	return context.WithValue(ctx, oauth2.HTTPClient, client)
 }
 
-func doRequest(ctx context.Context, req *http.Request) (*http.Response, error) {
-	client := http.DefaultClient
-	if c, ok := ctx.Value(oauth2.HTTPClient).(*http.Client); ok {
-		client = c
-	}
-	return client.Do(req.WithContext(ctx))
-}
-
 // Provider represents an OpenID Connect server's configuration.
 type Provider struct {
 	issuer      string
@@ -89,17 +82,37 @@ type providerJSON struct {
 	UserInfoURL string `json:"userinfo_endpoint"`
 }
 
+func doRequest(ctx context.Context, req *http.Request, disableCheck bool) (*http.Response, error) {
+
+	client := http.DefaultClient
+
+	if !disableCheck {
+		if c, ok := ctx.Value(oauth2.HTTPClient).(*http.Client); ok {
+			client = c
+		}
+	} else {
+		transportConfig := &http.Transport{
+			// ignore check for self signed only  dev !!
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+
+		client = &http.Client{Transport: transportConfig}
+	}
+
+	return client.Do(req.WithContext(ctx))
+}
+
 // NewProvider uses the OpenID Connect discovery mechanism to construct a Provider.
 //
 // The issuer is the URL identifier for the service. For example: "https://accounts.google.com"
 // or "https://login.salesforce.com".
-func NewProvider(ctx context.Context, issuer string) (*Provider, error) {
+// add temporary disabling of cert check for test purpose only
+func NewProvider(ctx context.Context, issuer string, disableCheck bool) (*Provider, error) {
 	wellKnown := strings.TrimSuffix(issuer, "/") + "/.well-known/openid-configuration"
 	req, err := http.NewRequest("GET", wellKnown, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := doRequest(ctx, req)
+	resp, err := doRequest(ctx, req, disableCheck)
 	if err != nil {
 		return nil, err
 	}
@@ -177,7 +190,7 @@ func (u *UserInfo) Claims(v interface{}) error {
 }
 
 // UserInfo uses the token source to query the provider's user info endpoint.
-func (p *Provider) UserInfo(ctx context.Context, tokenSource oauth2.TokenSource) (*UserInfo, error) {
+func (p *Provider) UserInfo(ctx context.Context, tokenSource oauth2.TokenSource, disableCheck bool) (*UserInfo, error) {
 	if p.userInfoURL == "" {
 		return nil, errors.New("oidc: user info endpoint is not supported by this provider")
 	}
@@ -193,7 +206,7 @@ func (p *Provider) UserInfo(ctx context.Context, tokenSource oauth2.TokenSource)
 	}
 	token.SetAuthHeader(req)
 
-	resp, err := doRequest(ctx, req)
+	resp, err := doRequest(ctx, req, disableCheck)
 	if err != nil {
 		return nil, err
 	}
